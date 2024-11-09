@@ -1,256 +1,294 @@
 <?php
+require 'vendor/autoload.php';
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
+
+// Bắt đầu phiên làm việc để sử dụng biến session
 session_start();
 
-$message = '';
-$type = ''; // 'success' hoặc 'error'
-if (isset($_SESSION['message'])) {
-    $message = $_SESSION['message'];
-    $error_keywords = ['khớp', 'không', 'Lỗi', 'thất bại', 'sử dụng email khác'];
-    $type = 'success';
-    foreach ($error_keywords as $word) {
-        if (stripos($message, $word) !== false) {
-            $type = 'error';
-            break;
-        }
+// Kết nối cơ sở dữ liệu
+include("connect.inp");
+
+if (!$conn) {
+    $_SESSION['message'] = "Kết nối cơ sở dữ liệu thất bại: " . mysqli_connect_error();
+    header("Location: signin.php");
+    exit();
+}
+
+// Lấy dữ liệu từ biểu mẫu
+$hoten = isset($_POST['hoten']) ? trim($_POST['hoten']) : '';
+$email = isset($_POST['email']) ? trim($_POST['email']) : '';
+$matkhau = isset($_POST['matkhau']) ? $_POST['matkhau'] : '';
+$xacnhanmatkhau = isset($_POST['xacnhanmatkhau']) ? $_POST['xacnhanmatkhau'] : '';
+
+if (!empty($hoten) && !empty($email) && !empty($matkhau) && !empty($xacnhanmatkhau)) {
+    if ($matkhau !== $xacnhanmatkhau) {
+        $_SESSION['message'] = "Mật khẩu xác nhận không khớp!";
+        header("Location: signin.php");
+        exit();
     }
-    unset($_SESSION['message']);
+
+    // Mã hóa mật khẩu
+    $hashed_password = password_hash($matkhau, PASSWORD_BCRYPT);
+
+    // Kiểm tra xem email đã tồn tại hay chưa
+    $check_query = "SELECT trangthai FROM user WHERE email = ?";
+    $check_stmt = $conn->prepare($check_query);
+    if (!$check_stmt) {
+        $_SESSION['message'] = "Lỗi chuẩn bị câu lệnh: " . $conn->error;
+        header("Location: signin.php");
+        exit();
+    }
+    $check_stmt->bind_param("s", $email);
+    $check_stmt->execute();
+    $result = $check_stmt->get_result();
+
+    if ($result->num_rows > 0) {
+        $row = $result->fetch_assoc();
+        if ($row['trangthai'] == 0) {
+            $_SESSION['message'] = "Email này đã được sử dụng, vui lòng sử dụng email khác.";
+        } elseif ($row['trangthai'] == 1 && sendConfirmationEmail($email, $hoten)) {
+            $_SESSION['message'] = "Email xác nhận đăng ký đã được gửi đến hộp thư của bạn, vui lòng kiểm tra!";
+        }
+        $check_stmt->close();
+        $conn->close();
+        header("Location: signin.php");
+        exit();
+    } else {
+        // Chèn dữ liệu vào cơ sở dữ liệu
+        $stmt = $conn->prepare("INSERT INTO user (hoten, email, matkhau, trangthai) VALUES (?, ?, ?, 1)");
+        if (!$stmt) {
+            $_SESSION['message'] = "Lỗi chuẩn bị câu lệnh chèn: " . $conn->error;
+            header("Location: signin.php");
+            exit();
+        }
+        $stmt->bind_param("sss", $hoten, $email, $hashed_password);
+        if ($stmt->execute()) {
+            // Gửi email xác nhận
+            if (sendConfirmationEmail($email, $hoten)) {
+                $_SESSION['message'] = "Email xác nhận đăng ký đã được gửi đến hộp thư của bạn, vui lòng kiểm tra!";
+            } else {
+                $_SESSION['message'] = "Gửi email xác nhận thất bại.";
+            }
+        } else {
+            $_SESSION['message'] = "Lỗi khi thêm tài khoản: " . $stmt->error;
+        }
+        $stmt->close();
+        $conn->close();
+        header("Location: signin.php");
+        exit();
+    }
+} else {
+    $_SESSION['message'] = "Lỗi: Các trường không được để trống.";
+    header("Location: signin.php");
+    exit();
+}
+
+// Hàm gửi email xác nhận
+function sendConfirmationEmail($recipientEmail, $recipientName) {
+    $mail = new PHPMailer(true);
+
+    try {
+        // Cấu hình SMTP
+        $mail->isSMTP();
+        $mail->Host = 'smtp.gmail.com';
+        $mail->SMTPAuth = true;
+        $mail->CharSet = 'UTF-8';
+        $mail->Username = 'dohongba03@gmail.com'; // Thay bằng email của bạn
+        $mail->Password = 'enjw uhjb hzeu frkf'; // Thay bằng mật khẩu ứng dụng hoặc mật khẩu của bạn
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port = 587;
+
+        // Thông tin người gửi và người nhận
+        $mail->setFrom('dohongba03@gmail.com', 'Tủ nhà Mây'); // Thay đổi nếu cần
+        $mail->addAddress($recipientEmail, $recipientName);
+
+        // Nội dung email
+        $mail->isHTML(true);
+        $mail->Subject = 'Xác nhận đăng ký tài khoản';
+        $mail->Body = getHtmlContent($recipientName, $recipientEmail);
+        $mail->AltBody = 'Cảm ơn bạn đã đăng ký.';
+
+        $mail->send();
+        return true;
+    } catch (Exception $e) {
+        // Ghi log lỗi hoặc thực hiện các bước khác nếu cần
+        return false;
+    }
+}
+
+// Hàm tạo nội dung email HTML
+function getHtmlContent($hoten, $email) {
+    // Tạo liên kết xác nhận với địa chỉ thực tế
+    $confirmationLink = "https://yourdomain.com/confirm.php?email=" . urlencode($email);
+
+    // Nội dung email HTML mới
+    return "
+    <!DOCTYPE html>
+    <html lang='vi'>
+    <head>
+      <meta charset='UTF-8'>
+      <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+      <title>Xác nhận đăng ký tài khoản - Áo dài Tủ Nhà Mây</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          background-color: #F3EDEB;
+          margin: 0;
+          padding: 0;
+          color: #4A4A4A;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+        }
+        .container {
+          width: 100%;
+          max-width: 600px;
+          background-color: #ffffff;
+          border-radius: 10px;
+          box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+          overflow: hidden;
+        }
+        .header {
+          background-color: rgba(224, 142, 94, 0.1);
+          padding: 20px;
+          text-align: center;
+          border-top-left-radius: 10px;
+          border-top-right-radius: 10px;
+          margin: 0;
+        }
+        .logo img {
+          width: 90px;
+          height: 90px;
+          border-radius: 50%;
+          border: 2px solid #A07E6A;
+        }
+        .content {
+          padding: 30px 20px;
+          text-align: center;
+          line-height: 1.8;
+          color: #333;
+        }
+        .content h1 {
+          color: #A07E6A;
+          font-size: 24px;
+          margin-bottom: 10px;
+        }
+        .content h2 {
+          color: #A07E6A;
+          font-size: 22px;
+          margin-bottom: 8px;
+        }
+        .content p {
+          font-size: 16px;
+          margin: 12px 0;
+          color: #555;
+        }
+        .button {
+          display: inline-block;
+          background-color: #A07E6A;
+          color: #ffffff;
+          padding: 14px 28px;
+          border-radius: 6px;
+          text-decoration: none;
+          font-weight: bold;
+          font-size: 16px;
+          transition: background-color 0.3s ease, transform 0.3s ease;
+          margin: 30px 0;
+          box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+        }
+        .button:hover {
+          background-color: #8D6D5B;
+          transform: scale(1.05);
+        }
+        .footer {
+          background-color: rgba(224, 142, 94, 0.1);
+          padding: 20px;
+          text-align: center;
+          border-bottom-left-radius: 10px;
+          border-bottom-right-radius: 10px;
+          font-size: 14px;
+          color: #666;
+          margin: 0;
+        }
+        .footer p {
+          font-size: 16px;
+          color: #333;
+          font-weight: normal;
+        }
+        .footer-links {
+          margin-top: 15px;
+          display: flex;
+          justify-content: center;
+          gap: 20px;
+          flex-wrap: wrap;
+        }
+        .footer-links a {
+          text-decoration: none;
+          color: #333;
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          font-weight: 500;
+        }
+        .footer-links img {
+          width: 20px;
+          height: 20px;
+          vertical-align: middle;
+        }
+      </style>
+    </head>
+    <body>
+      <div class='container'>
+        <!-- Header -->
+        <div class='header'>
+          <div class='logo'>
+            <img src='https://scontent.fhan14-1.fna.fbcdn.net/v/t39.30808-6/465940572_3349274525368692_7354616264747658971_n.jpg?_nc_cat=105&ccb=1-7&_nc_sid=127cfc&_nc_eui2=AeEU3vsJvsMHvnCqQhLkTHUmNjCpLXqON1o2MKkteo43Wr85d5XKaIeePb5riGgmINdhK9RM5pzCJwRxHR2SzYCt&_nc_ohc=fdiVCJeaZUsQ7kNvgELEoFo&_nc_zt=23&_nc_ht=scontent.fhan14-1.fna&_nc_gid=A8mnCHaPVF0e09iuDRw3p6x&oh=00_AYCo7hWRRSytpzk0iDm-NuKUlN1bFdCAwTN8tzLJ1-LWBw&oe=6734C307' alt='Tủ Nhà Mây Logo'>
+          </div>
+        </div>
+
+        <!-- Nội dung email -->
+        <div class='content'>
+          <h1>Xác nhận đăng ký tài khoản!</h1>
+          <h2>Chào mừng bạn đến với Áo dài Tủ Nhà Mây!</h2>
+          <p>Xin chào $hoten,</p>
+          <p>Cảm ơn bạn đã đăng ký tài khoản tại <strong>Áo dài Tủ Nhà Mây</strong>. Để hoàn tất đăng ký, vui lòng xác nhận tài khoản của bạn bằng cách nhấn vào nút dưới đây:</p>
+          <a href='$confirmationLink' class='button'>Xác nhận tài khoản</a>
+          <p style='margin-top: 20px;'>Nếu bạn không thực hiện đăng ký này, vui lòng bỏ qua email này.</p>
+        </div>
+
+        <!-- Footer -->
+        <div class='footer'>
+          <p>Kết nối với chúng tôi:</p>
+          <div class='footer-links'>
+            <a href='https://www.tunhamay.vn/' target='_blank'>
+              <img src='https://cdn-icons-png.flaticon.com/512/25/25694.png' alt='Website Icon'>
+              Website
+            </a>
+            <a href='tel:0363427583'>
+              <img src='https://cdn-icons-png.flaticon.com/512/724/724664.png' alt='Hotline Icon'>
+              Hotline: 0363427583
+            </a>
+            <a href='https://www.facebook.com/TuNhaMay' target='_blank'>
+              <img src='https://cdn-icons-png.flaticon.com/512/124/124010.png' alt='Facebook Icon'>
+              Tủ Nhà Mây
+            </a>
+            <a href='https://www.instagram.com/tunhamay.official/' target='_blank'>
+              <img src='https://cdn-icons-png.flaticon.com/512/2111/2111463.png' alt='Instagram Logo'>
+              Tủ Nhà Mây
+            </a>
+            <a href='mailto:Tunhamayofficial@gmail.com'>
+              <img src='https://cdn-icons-png.flaticon.com/512/732/732200.png' alt='Email Icon'>
+              Tunhamayofficial@gmail.com
+            </a>
+            <a href='https://goo.gl/maps/YOUR_MAP_LINK' target='_blank'>
+              <img src='https://cdn-icons-png.flaticon.com/512/684/684908.png' alt='Location Icon'>
+              137 Tôn Đức Thắng, Hà Nội
+            </a>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>";
 }
 ?>
-
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Đăng Ký</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            background: #FFFAFA;
-        }
-        .signup-container {
-            background-color: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            width: 320px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-            text-align: center;
-            position: relative;
-        }
-        .signup-container h2 {
-            margin-bottom: 20px;
-            font-size: 24px;
-            color: #333;
-        }
-        .signup-container input[type="text"],
-        .signup-container input[type="email"],
-        .password-field input[type="password"] {
-            width: 100%;
-            padding: 10px;
-            margin: 10px 0;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-size: 16px;
-            box-sizing: border-box;
-        }
-        .error-message {
-            color: red;
-            font-size: 12px;
-            text-align: left;
-            width: 90%;
-            margin: 0 auto;
-            margin-bottom: 10px;
-        }
-        .password-field {
-            position: relative;
-            margin: 3px 0;
-            width: 100%;
-        }
-        .password-toggle {
-            position: absolute;
-            right: 10px;
-            top: 50%;
-            transform: translateY(-50%);
-            cursor: pointer;
-            width: 20px;
-            height: 20px;
-        }
-        .signup-container input[type="submit"] {
-            width: 100%;
-            padding: 10px;
-            background-color: #5a67d8;
-            border: none;
-            border-radius: 5px;
-            color: #fff;
-            font-size: 16px;
-            cursor: pointer;
-            opacity: 0.5;
-            pointer-events: none;
-            transition: opacity 0.3s;
-        }
-        .signup-container input[type="submit"]:enabled {
-            opacity: 1;
-            pointer-events: all;
-        }
-        .resend-email {
-            margin-top: 15px;
-            font-size: 14px;
-        }
-        .resend-email a {
-            color: #5a67d8;
-            text-decoration: none;
-        }
-        .resend-email a:hover {
-            text-decoration: underline;
-        }
-
-        .notification-popup {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 10px;
-            max-width: 300px;
-            font-size: 13px;
-            border-radius: 5px;
-            box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
-            display: none;
-            z-index: 1000;
-        }
-        .notification-popup.error {
-            background-color: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-        .notification-popup.success {
-            background-color: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-        .notification-popup p {
-            margin: 0;
-        }
-        .close-notification {
-            float: right;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-left: 10px;
-        }
-    </style>
-    <script>
-        function validateForm() {
-            const hoten = document.forms["registrationForm"]["hoten"].value;
-            const email = document.forms["registrationForm"]["email"].value;
-            const matkhau = document.forms["registrationForm"]["matkhau"].value;
-            const xacnhanmatkhau = document.forms["registrationForm"]["xacnhanmatkhau"].value;
-
-            let isValid = true;
-
-            const hotenError = document.getElementById("hoten-error");
-            if (!hoten) {
-                hotenError.textContent = "Hãy nhập họ tên của bạn";
-                isValid = false;
-            } else {
-                hotenError.textContent = "";
-            }
-
-            const emailError = document.getElementById("email-error");
-            const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            if (!email) {
-                emailError.textContent = "Hãy nhập email của bạn";
-                isValid = false;
-            } else if (!emailPattern.test(email)) {
-                emailError.textContent = "Email không đúng định dạng";
-                isValid = false;
-            } else {
-                emailError.textContent = "";
-            }
-
-            const matkhauError = document.getElementById("matkhau-error");
-            const passwordPattern = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*])[A-Za-z\d!@#$%^&*]{8,}$/;
-            if (!passwordPattern.test(matkhau)) {
-                matkhauError.textContent = "Mật khẩu ít nhất 8 ký tự bao gồm chữ hoa, số, ký tự đặc biệt";
-                isValid = false;
-            } else {
-                matkhauError.textContent = "";
-            }
-
-            const xacnhanmatkhauError = document.getElementById("xacnhanmatkhau-error");
-            if (matkhau !== xacnhanmatkhau) {
-                xacnhanmatkhauError.textContent = "Mật khẩu không trùng khớp";
-                isValid = false;
-            } else {
-                xacnhanmatkhauError.textContent = "";
-            }
-
-            document.getElementById("submit-btn").disabled = !isValid;
-        }
-
-        function showNotification(message, type) {
-            const notification = document.getElementById("notification-popup");
-            const notificationMessage = document.getElementById("notification-message");
-            notificationMessage.textContent = message;
-            notification.className = 'notification-popup ' + type;
-            notification.style.display = "block";
-        }
-
-        window.onload = function() {
-            <?php if (!empty($message)): ?>
-                showNotification("<?php echo addslashes($message); ?>", "<?php echo $type; ?>");
-            <?php endif; ?>
-        };
-
-        function togglePassword(fieldId, iconId) {
-            const field = document.getElementById(fieldId);
-            const icon = document.getElementById(iconId);
-
-            if (field.type === "password") {
-                field.type = "text";
-                icon.src = "image/hiện.jpg";
-            } else {
-                field.type = "password";
-                icon.src = "image/ẩn.jpg";
-            }
-        }
-    </script>
-</head>
-<body>
-    <div class="signup-container">
-        <h2>Đăng ký tài khoản</h2>
-        <form name="registrationForm" method="POST" action="xlsignin.php" oninput="validateForm()">
-            <input type="text" name="hoten" placeholder="Họ tên" required><br>
-            <div id="hoten-error" class="error-message"></div>
-
-            <input type="email" name="email" placeholder="Email" required><br>
-            <div id="email-error" class="error-message"></div>
-            
-            <div class="password-field">
-                <input type="password" id="matkhau" name="matkhau" placeholder="Mật khẩu">
-                <img src="image/hiện.jpg" alt="Toggle Password" id="matkhau-icon" class="password-toggle" onclick="togglePassword('matkhau', 'matkhau-icon')">
-            </div>
-            <div id="matkhau-error" class="error-message"></div>
-
-            <div class="password-field">
-                <input type="password" id="xacnhanmatkhau" name="xacnhanmatkhau" placeholder="Xác nhận mật khẩu">
-                <img src="image/hiện.jpg" alt="Toggle Password" id="xacnhanmatkhau-icon" class="password-toggle" onclick="togglePassword('xacnhanmatkhau', 'xacnhanmatkhau-icon')">
-            </div>
-            <div id="xacnhanmatkhau-error" class="error-message"></div>
-
-            <input type="submit" value="Đăng ký" id="submit-btn" disabled>
-        </form>
-        <div class="resend-email">
-            Bạn chưa nhận được email xác nhận? <a href="resend.php">Gửi lại</a>
-        </div>
-    </div>
-
-    <div id="notification-popup" class="notification-popup">
-        <span class="close-notification" onclick="document.getElementById('notification-popup').style.display='none'">&times;</span>
-        <p id="notification-message"></p>
-    </div>
-</body>
-</html>
